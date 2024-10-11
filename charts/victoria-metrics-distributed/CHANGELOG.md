@@ -10,6 +10,7 @@
 - `availabilityZones[*].vmauthIngest` was moved to `availabilityZones[*].write.vmauth`
 - `availabilityZones[*].vmauthQueryPerZone` was moved to `availabilityZones[*].read.perZone.vmauth`
 - `availabilityZones[*].vmauthCrossAZQuery` was moved to `availabilityZones[*].read.crossZone.vmauth`
+- Human-readable error about Helm version requirement
 
 ## 0.4.0
 
