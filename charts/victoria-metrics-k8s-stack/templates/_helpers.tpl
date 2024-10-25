@@ -98,7 +98,7 @@ If release name contains chart name it will be used as a full name.
     {{- if kindIs "slice" $prefix }}
       {{- $prefix = last $prefix -}}
     {{- end -}}
-    {{- $prefix = ternary $prefix (printf "vm%s" $prefix) (hasPrefix "vm" $prefix) -}}
+    {{- $prefix = ternary $prefix (printf "vm%s" $prefix) (or (hasPrefix "vm" $prefix) (hasPrefix "vl" $prefix)) -}}
     {{- $name = printf "%s-%s" $prefix $name -}}
   {{- end -}}
   {{- if hasKey . "appIdx" -}}
@@ -147,7 +147,11 @@ If release name contains chart name it will be used as a full name.
     {{- $_ := set $ctx "appKey" "vmsingle" -}}
     {{- $_ := set $endpoint "url" (include "vm.url" $ctx) -}}
   {{- else if $Values.vmcluster.enabled -}}
-    {{- $_ := set $ctx "appKey" (list "vmcluster" "vmselect") -}}
+    {{- if $Values.vmauth.enabled -}}
+      {{- $_ := set $ctx "appKey" "vmauth" -}}
+    {{- else -}}
+      {{- $_ := set $ctx "appKey" (list "vmcluster" "vmselect") -}}
+    {{- end -}}
     {{- $baseURL := (trimSuffix "/" (include "vm.url" $ctx)) -}}
     {{- $tenant := ($Values.tenant | default 0) -}}
     {{- $_ := set $endpoint "url" (printf "%s/select/%d/prometheus" $baseURL (int $tenant)) -}}
@@ -166,7 +170,11 @@ If release name contains chart name it will be used as a full name.
     {{- $baseURL := (trimSuffix "/" (include "vm.url" $ctx)) -}}
     {{- $_ := set $endpoint "url" (printf "%s/api/v1/write" $baseURL) -}}
   {{- else if $Values.vmcluster.enabled -}}
-    {{- $_ := set $ctx "appKey" (list "vmcluster" "vminsert") -}}
+    {{- if $Values.vmauth.enabled -}}
+      {{- $_ := set $ctx "appKey" "vmauth" -}}
+    {{- else -}}
+      {{- $_ := set $ctx "appKey" (list "vmcluster" "vminsert") -}}
+    {{- end -}}
     {{- $baseURL := (trimSuffix "/" (include "vm.url" $ctx)) -}}
     {{- $tenant := ($Values.tenant | default 0) -}}
     {{- $_ := set $endpoint "url" (printf "%s/insert/%d/prometheus/api/v1/write" $baseURL (int $tenant)) -}}
@@ -198,9 +206,9 @@ If release name contains chart name it will be used as a full name.
     {{- $_ := set $remotes "notifierConfigRef" $notifierConfigRef -}}
   {{- else if $Values.alertmanager.enabled -}}
     {{- $notifiers := default list -}}
-    {{- $appSecure := (not (empty (((.Values.alertmanager).spec).webConfig).tls_server_config)) -}}
-    {{- $ctx := dict "helm" . "appKey" "alertmanager" "appSecure" $appSecure "appRoute" ((.Values.alertmanager).spec).routePrefix -}}
-    {{- $alertManagerReplicas := (.Values.alertmanager.spec.replicaCount | default 1 | int) -}}
+    {{- $appSecure := (not (empty ((($Values.alertmanager).spec).webConfig).tls_server_config)) -}}
+    {{- $ctx := dict "helm" . "appKey" "alertmanager" "appSecure" $appSecure "appRoute" (($Values.alertmanager).spec).routePrefix -}}
+    {{- $alertManagerReplicas := ($Values.alertmanager.spec.replicaCount | default 1 | int) -}}
     {{- range until $alertManagerReplicas -}}
       {{- $_ := set $ctx "appIdx" . -}}
       {{- $notifiers = append $notifiers (dict "url" (include "vm.url" $ctx)) -}}
@@ -212,7 +220,7 @@ If release name contains chart name it will be used as a full name.
 
 {{- /* VMAlert templates */ -}}
 {{- define "vm.alert.templates" -}}
-  {{- $Values := (.helm).Values | default .Values}}
+  {{- $Values := (.helm).Values | default .Values -}}
   {{- $cms :=  ($Values.vmalert.spec.configMaps | default list) -}}
   {{- if $Values.vmalert.templateFiles -}}
     {{- $fullname := (include "victoria-metrics-k8s-stack.fullname" .) -}}
@@ -223,7 +231,8 @@ If release name contains chart name it will be used as a full name.
 {{- end -}}
 
 {{- define "vm.license.global" -}}
-  {{- $license := (deepCopy (.Values.global).license) | default dict -}}
+  {{- $Values := (.helm).Values | default .Values -}}
+  {{- $license := (deepCopy ($Values.global).license) | default dict -}}
   {{- if $license.key -}}
     {{- if hasKey $license "keyRef" -}}
       {{- $_ := unset $license "keyRef" -}}
@@ -253,7 +262,7 @@ If release name contains chart name it will be used as a full name.
   {{- with (include "vm.license.global" .) -}}
     {{- $_ := set $spec "license" (fromYaml .) -}}
   {{- end -}}
-  {{- with concat ($vmAlertRemotes.notifiers | default list) (.Values.vmalert.spec.notifiers | default list) }}
+  {{- with concat ($vmAlertRemotes.notifiers | default list) ($Values.vmalert.spec.notifiers | default list) }}
     {{- $_ := set $vmAlertRemotes "notifiers" . }}
   {{- end }}
   {{- $spec := deepCopy (omit $Values.vmalert.spec "notifiers") | mergeOverwrite $vmAlertRemotes | mergeOverwrite $vmAlertTemplates | mergeOverwrite $spec }}
@@ -297,22 +306,55 @@ If release name contains chart name it will be used as a full name.
     {{- $srcPath := clean (printf "%s/.*" (urlParse $url).path) }}
     {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig (dict "src_paths" (list $srcPath) "url_prefix" (list $url)) }}
   {{- else if $Values.vmcluster.enabled -}}
+    {{- $authConfig := ($Values.vmcluster).vmauth }}
     {{- $_ := set $ctx "appKey" (list "vmcluster" "vminsert") -}}
+    {{- $writeAuths := $authConfig.vminsert }}
     {{- $writeUrl := (include "vm.url" $ctx) }}
-    {{- $writeSrcPath := clean (printf "%s/insert/.*" (urlParse $writeUrl).path) }}
-    {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig (dict "src_paths" (list $writeSrcPath) "url_prefix" (list $writeUrl)) }}
+    {{- range $writeAuth := $writeAuths }}
+      {{- $urls := default list }}
+      {{- range $prefix := $writeAuth.url_prefix }}
+        {{- $urls = append $urls (printf "%s%s" (trimSuffix (urlParse $writeUrl).path $writeUrl) $prefix) }}
+      {{- end }}
+      {{- $_ := set $writeAuth "url_prefix" $urls}}
+      {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig $writeAuth -}}
+    {{- end }}
     {{- $_ := set $ctx "appKey" (list "vmcluster" "vmselect") -}}
+    {{- $readAuths := $authConfig.vmselect }}
     {{- $readUrl := (include "vm.url" $ctx) }}
-    {{- $readSrcPath := clean (printf "%s/select/.*" (urlParse $readUrl).path) }}
-    {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig (dict "src_paths" (list $readSrcPath) "url_prefix" (list $readUrl)) }}
+    {{- range $readAuth := $readAuths }}
+      {{- $urls := default list }}
+      {{- range $prefix := $readAuth.url_prefix }}
+        {{- $urls = append $urls (printf "%s%s" (trimSuffix (urlParse $readUrl).path $readUrl) $prefix) }}
+      {{- end }}
+      {{- $_ := set $readAuth "url_prefix" $urls}}
+      {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig $readAuth -}}
+    {{- end -}}
   {{- else if or $Values.externalVM.read.url $Values.externalVM.write.url }}
     {{- with $Values.externalVM.read.url }}
-      {{- $srcPath := regexReplaceAll "(.*)/api/.*" (clean (printf "%s/.*" (urlParse .).path)) "${1}" }}
-      {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig (dict "src_paths" (list $srcPath) "url_prefix" (list .)) }}
+      {{- $authConfig := ($.Values.externalVM).vmauth }}
+      {{- $readAuths := $authConfig.read }}
+      {{- $readUrl := . }}
+      {{- range $readAuth := $readAuths }}
+        {{- $urls := default list }}
+        {{- range $prefix := $readAuth.url_prefix }}
+          {{- $urls = append $urls (printf "%s%s" (trimSuffix (urlParse $readUrl).path $readUrl) $prefix) }}
+        {{- end }}
+        {{- $_ := set $readAuth "url_prefix" $urls}}
+        {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig $readAuth -}}
+      {{- end -}}
     {{- end -}}
     {{- with $Values.externalVM.write.url }}
-      {{- $srcPath := regexReplaceAll "(.*)/api/.*" (clean (printf "%s/.*" (urlParse .).path)) "${1}" }}
-      {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig (dict "src_paths" (list $srcPath) "url_prefix" (list .)) }}
+      {{- $authConfig := ($.Values.externalVM).vmauth }}
+      {{- $writeAuths := $authConfig.write }}
+      {{- $writeUrl := . }}
+      {{- range $writeAuth := $writeAuths }}
+        {{- $urls := default list }}
+        {{- range $prefix := $writeAuth.url_prefix }}
+          {{- $urls = append $urls (printf "%s%s" (trimSuffix (urlParse $writeUrl).path $writeUrl) $prefix) }}
+        {{- end }}
+        {{- $_ := set $writeAuth "url_prefix" $urls}}
+        {{- $unauthorizedAccessConfig = append $unauthorizedAccessConfig $writeAuth -}}
+      {{- end -}}
     {{- end -}}
   {{- end -}}
   {{- $spec := $Values.vmauth.spec }}
@@ -337,7 +379,7 @@ If release name contains chart name it will be used as a full name.
     {{- $templates = append $templates (dict "name" $configMap "key" "monzo.tmpl") -}}
   {{- end -}}
   {{- $configMap := (printf "%s-alertmanager-extra-tpl" $fullname) -}}
-  {{- range $key, $value := (.Values.alertmanager.templateFiles | default dict) -}}
+  {{- range $key, $value := ($Values.alertmanager.templateFiles | default dict) -}}
     {{- $templates = append $templates (dict "name" $configMap "key" $key) -}}
   {{- end -}}
   {{- $_ := set $spec "templates" $templates -}}
@@ -377,9 +419,10 @@ If release name contains chart name it will be used as a full name.
   {{- $Values := (.helm).Values | default .Values }}
   {{- $Chart := (.helm).Chart | default .Chart }}
   {{- $spec := (include "vm.select.spec" . | fromYaml) -}}
-  {{- $_ := set $spec "vminsert" (dict "image" (dict "tag" (printf "%s-cluster" $Chart.AppVersion))) -}}
-  {{- $_ := set $spec "vmstorage" (dict "image" (dict "tag" (printf "%s-cluster" $Chart.AppVersion))) -}}
   {{- $clusterSpec := (deepCopy $Values.vmcluster.spec) -}}
+  {{- $imageSpec := (dict "image" (dict "tag" (printf "%s-cluster" $Chart.AppVersion))) -}}
+  {{- $clusterSpec = mergeOverwrite (dict "vminsert" (deepCopy $imageSpec)) $clusterSpec -}}
+  {{- $clusterSpec = mergeOverwrite (dict "vmstorage" (deepCopy $imageSpec)) $clusterSpec -}}
   {{- with (include "vm.license.global" .) -}}
     {{- $_ := set $clusterSpec "license" (fromYaml .) -}}
   {{- end -}}
@@ -388,42 +431,43 @@ If release name contains chart name it will be used as a full name.
 
 {{- define "vm.data.source.enabled" -}}
   {{- $Values := (.helm).Values | default .Values -}}
-  {{- $grafana := $Values.grafana -}}
-  {{- $isEnabled := false -}}
-  {{- if $grafana.plugins -}}
-    {{- range $value := $grafana.plugins -}}
-      {{- if contains "victoriametrics-datasource" $value -}}
-        {{- $isEnabled = true -}}
+  {{- $ds := .ds -}}
+  {{- if hasPrefix "victoria" $ds.type -}}
+    {{- $grafana := $Values.grafana -}}
+    {{- $isEnabled := false -}}
+    {{- if $grafana.plugins -}}
+      {{- range $value := $grafana.plugins -}}
+        {{- if contains $ds.type $value -}}
+          {{- $isEnabled = true -}}
+        {{- end }}
       {{- end }}
     {{- end }}
+    {{- $unsignedPlugins := ((index $grafana "grafana.ini").plugins).allow_loading_unsigned_plugins | default "" -}}
+    {{- $allowUnsigned := contains "victoriametrics-datasource" $unsignedPlugins -}}
+    {{- ternary "true" "" (and $isEnabled $allowUnsigned) -}}
+  {{- else -}}
+    {{ "true" }}
   {{- end }}
-  {{- $unsignedPlugins := ((index $grafana "grafana.ini").plugins).allow_loading_unsigned_plugins | default "" -}}
-  {{- $allowUnsigned := contains "victoriametrics-datasource" $unsignedPlugins -}}
-  {{- ternary "true" "" (and $isEnabled $allowUnsigned) -}}
 {{- end -}}
 
 {{- /* Datasources */ -}}
 {{- define "vm.data.sources" -}}
   {{- $Values := (.helm).Values | default .Values }}
-  {{- $grafana := $Values.grafana -}}
-  {{- $datasources := $Values.grafana.additionalDataSources | default list -}}
-  {{- $vmDatasource := "victoriametrics-datasource" -}}
-  {{- $allowVMDatasource := (ternary false true (empty (include "vm.data.source.enabled" .))) -}}
+  {{- $datasources := $Values.defaultDatasources.extra | default list -}}
   {{- if or $Values.vmsingle.enabled $Values.vmcluster.enabled -}}
     {{- $ctx := dict "helm" . -}}
     {{- $readEndpoint:= (include "vm.read.endpoint" $ctx | fromYaml) -}}
     {{- $defaultDatasources := default list -}}
-    {{- range $ds := $grafana.sidecar.datasources.default }}
-      {{- if not $ds.type -}}
-        {{- $_ := set $ds "type" $Values.grafana.defaultDatasourceType }}
-      {{- end -}}
-      {{- if or (ne $ds.type $vmDatasource) $allowVMDatasource -}}
+    {{- range $ds := $Values.defaultDatasources.victoriametrics.datasources }}
+      {{- $_ := set $ctx "ds" $ds }}
+      {{- $allowedDatasource := (ternary false true (empty (include "vm.data.source.enabled" $ctx))) -}}
+      {{- if $allowedDatasource -}}
         {{- $_ := set $ds "url" $readEndpoint.url -}}
         {{- $defaultDatasources = append $defaultDatasources $ds -}}
       {{- end -}}
     {{- end }}
     {{- $datasources = concat $datasources $defaultDatasources -}}
-    {{- if and $grafana.sidecar.datasources.createVMReplicasDatasources $defaultDatasources -}}
+    {{- if and $Values.defaultDatasources.victoriametrics.perReplica $defaultDatasources -}}
       {{- range $id := until (int $Values.vmsingle.spec.replicaCount) -}}
         {{- $_ := set $ctx "appIdx" $id -}}
         {{- $readEndpoint := (include "vm.read.endpoint" $ctx | fromYaml) -}}
@@ -436,6 +480,15 @@ If release name contains chart name it will be used as a full name.
         {{- end -}}
       {{- end -}}
     {{- end -}}
+  {{- end -}}
+  {{- if $Values.alertmanager.enabled -}}
+    {{- range $ds := $Values.defaultDatasources.alertmanager.datasources }}
+      {{- $appSecure := (not (empty ((($Values.alertmanager).spec).webConfig).tls_server_config)) -}}
+      {{- $ctx := dict "helm" $ "appKey" "alertmanager" "appSecure" $appSecure "appRoute" (($Values.alertmanager).spec).routePrefix -}}
+      {{- $_ := set $ds "url" (include "vm.url" $ctx) -}}
+      {{- $_ := set $ds "type" "alertmanager" -}}
+      {{- $datasources = append $datasources $ds -}}
+    {{- end }}
   {{- end -}}
   {{- toYaml $datasources -}}
 {{- end }}

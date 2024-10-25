@@ -34,6 +34,7 @@ If release name contains chart name it will be used as a full name.
   {{- $Chart := (.helm).Chart | default .Chart -}}
   {{- $Release := (.helm).Release | default .Release -}}
   {{- $fullname := "" -}}
+  {{- $appendDefault := true -}}
   {{- if .appKey -}}
     {{- $appKey := ternary (list .appKey) .appKey (kindIs "string" .appKey) -}}
     {{- $values := $Values -}}
@@ -47,6 +48,9 @@ If release name contains chart name it will be used as a full name.
       {{- end -}}
       {{- if and (kindIs "map" $values) $values.name -}}
         {{- $fullname = $values.name -}}
+      {{- else if and (kindIs "map" $values) $values.fullnameOverride -}}
+        {{- $fullname = $values.fullnameOverride -}}
+        {{- $appendDefault = false -}}
       {{- else if and (kindIs "map" $global) $global.name -}}
         {{- $fullname = $global.name -}}
       {{- end -}}
@@ -68,10 +72,10 @@ If release name contains chart name it will be used as a full name.
       {{- end -}}
     {{- end -}}
   {{- end -}}
-  {{- with .prefix -}}
+  {{- with (ternary .prefix .oldPrefix $appendDefault) -}}
     {{- $fullname = printf "%s-%s" . $fullname -}}
   {{- end -}}
-  {{- with .suffix -}}
+  {{- with (ternary .suffix .oldSuffix $appendDefault) -}}
     {{- $fullname = printf "%s-%s" $fullname . -}}
   {{- end -}}
   {{- $fullname | trunc 63 | trimSuffix "-" -}}
@@ -79,34 +83,40 @@ If release name contains chart name it will be used as a full name.
 
 {{- define "vm.managed.fullname" -}}
   {{- $prefix := .appKey -}}
-  {{- $oldPrefix := .prefix -}}
   {{- if kindIs "slice" $prefix -}}
     {{- $prefix = last $prefix -}}
   {{- end -}}
+  {{- if or .prefix $prefix -}}
+    {{- $_ := set . "oldPrefix" .prefix }}
+  {{- end -}}
   {{- if $prefix -}}
-    {{- with $oldPrefix -}}
+    {{- with .oldPrefix -}}
       {{- $prefix = printf "%s-%s" $prefix . -}}
     {{- end }}
     {{- $_ := set $ "prefix" $prefix -}}
   {{- end -}}
   {{- include "vm.fullname" . -}}
-  {{- $_ := set . "prefix" $oldPrefix -}}
+  {{- $_ := set . "prefix" .oldPrefix -}}
+  {{- $_ := unset . "oldPrefix" -}}
 {{- end -}}
 
 {{- define "vm.plain.fullname" -}}
   {{- $suffix := .appKey -}}
-  {{- $oldSuffix := .suffix -}}
   {{- if kindIs "slice" $suffix -}}
     {{- $suffix = last $suffix }}
   {{- end -}}
+  {{- if or .suffix $suffix -}}
+    {{- $_ := set . "oldSuffix" .suffix }}
+  {{- end -}}
   {{- if $suffix -}}
-    {{- with $oldSuffix -}}
+    {{- with .oldSuffix -}}
       {{- $suffix = printf "%s-%s" $suffix . -}}
     {{- end -}}
     {{- $_ := set . "suffix" $suffix -}}
   {{- end -}}
   {{- include "vm.fullname" . -}}
-  {{- $_ := set . "suffix" $oldSuffix -}}
+  {{- $_ := set . "suffix" .oldSuffix -}}
+  {{- $_ := unset . "oldSuffix" -}}
 {{- end -}}
 
 {{- /* Create chart name and version as used by the chart label. */ -}}
@@ -132,6 +142,15 @@ If release name contains chart name it will be used as a full name.
   {{- $Release := (.helm).Release | default .Release -}}
   {{- $labels := .extraLabels | default dict -}}
   {{- $_ := set $labels "helm.sh/chart" (include "vm.chart" .) -}}
+  {{- $_ := set $labels "app.kubernetes.io/managed-by" $Release.Service -}}
+  {{- toYaml $labels -}}
+{{- end -}}
+
+{{- define "vm.podLabels" -}}
+  {{- include "vm.validate.args" . -}}
+  {{- $Release := (.helm).Release | default .Release -}}
+  {{- $labels := fromYaml (include "vm.selectorLabels" .) -}}
+  {{- $labels = mergeOverwrite $labels (.extraLabels | default dict) -}}
   {{- $_ := set $labels "app.kubernetes.io/managed-by" $Release.Service -}}
   {{- toYaml $labels -}}
 {{- end -}}

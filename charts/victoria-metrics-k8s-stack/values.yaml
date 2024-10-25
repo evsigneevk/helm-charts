@@ -22,15 +22,16 @@ argocdReleaseOverride: ""
 # -- VictoriaMetrics Operator dependency chart configuration. More values can be found [here](https://docs.victoriametrics.com/helm/victoriametrics-operator#parameters). Also checkout [here](https://docs.victoriametrics.com/operator/vars) possible ENV variables to configure operator behaviour
 victoria-metrics-operator:
   enabled: true
-  serviceMonitor:
-    enabled: true
-  crd:
-    create: false
+  crds:
+    # -- added temporary, till new operator version released
+    plain: true
     cleanup:
       enabled: true
       image:
         repository: bitnami/kubectl
         pullPolicy: IfNotPresent
+  serviceMonitor:
+    enabled: true
   operator:
     # -- By default, operator converts prometheus-operator objects.
     disable_prometheus_converter: false
@@ -48,13 +49,17 @@ serviceAccount:
 defaultDashboards:
   # -- Enable custom dashboards installation
   enabled: true
+  defaultTimezone: utc
+  labels: {}
+  annotations: {}
   grafanaOperator:
     # -- Create dashboards as CRDs (reuqires grafana-operator to be installed)
     enabled: false
-    instanceSelector:
-      matchLabels:
-        dashboards: "grafana"
-    allowCrossNamespaceImport: false
+    spec:
+      instanceSelector:
+        matchLabels:
+          dashboards: "grafana"
+      allowCrossNamespaceImport: false
   # -- Create dashboards as ConfigMap despite dependency it requires is not installed
   dashboards:
     victoriametrics-vmalert:
@@ -241,6 +246,19 @@ additionalVictoriaMetricsMap:
 
 # -- External VM read and write URLs
 externalVM:
+  # -- Custom VMAuth config, url_prefix requires only path, which will be appended to a read and write base URL.
+  # To disable auth for read or write empty list for component config `externalVM.vmauth.<component>: []`
+  vmauth:
+    read:
+      - src_paths:
+          - /select/.*
+        url_prefix:
+          - /
+    write:
+      - src_paths:
+          - /insert/.*
+        url_prefix:
+          - /
   read:
     url: ""
     # bearerTokenSecret:
@@ -312,6 +330,19 @@ vmcluster:
   enabled: false
   # -- VMCluster annotations
   annotations: {}
+  # -- Custom VMAuth config, url_prefix requires only path, which will be appended to a select and insert base URL.
+  # To disable auth for vmselect or vminsert empty list for component config `vmcluster.vmauth.<component>: []`
+  vmauth:
+    vmselect:
+      - src_paths:
+          - /select/.*
+        url_prefix:
+          - /
+    vminsert:
+      - src_paths:
+          - /insert/.*
+        url_prefix:
+          - /
   # -- Full spec for VMCluster CRD. Allowed values described [here](https://docs.victoriametrics.com/operator/api#vmclusterspec)
   spec:
     # -- Data retention period. Possible units character: h(ours), d(ays), w(eeks), y(ears), if no unit character specified - month. The minimum retention period is 24h. See these [docs](https://docs.victoriametrics.com/single-server-victoriametrics/#retention)
@@ -491,6 +522,7 @@ alertmanager:
   annotations: {}
   # -- (object) Full spec for VMAlertmanager CRD. Allowed values described [here](https://docs.victoriametrics.com/operator/api#vmalertmanagerspec)
   spec:
+    replicaCount: 1
     port: "9093"
     selectAllByDefault: true
     image:
@@ -778,6 +810,45 @@ vmagent:
     #    hosts:
     #      - vmagent.domain.com
 
+defaultDatasources:
+  victoriametrics:
+    # -- Create per replica prometheus compatible datasource
+    perReplica: false
+    # -- List of prometheus compatible datasource configurations.
+    # VM `url` will be added to each of them in templates.
+    datasources:
+      - name: VictoriaMetrics
+        type: prometheus
+        isDefault: true
+      - name: VictoriaMetrics (DS)
+        isDefault: false
+        type: victoriametrics-datasource
+  # -- List of alertmanager datasources.
+  # Alertmanager generated `url` will be added to each datasource in template if alertmanager is enabled
+  alertmanager:
+    # -- Create per replica alertmanager compatible datasource
+    perReplica: false
+    datasources:
+      - name: Alertmanager
+        access: proxy
+        jsonData:
+          implementation: prometheus
+  # -- Configure additional grafana datasources (passed through tpl).
+  # Check [here](http://docs.grafana.org/administration/provisioning/#datasources) for details
+  extra: []
+    # - name: prometheus-sample
+    #   access: proxy
+    #   basicAuth: true
+    #   basicAuthPassword: pass
+    #   basicAuthUser: daco
+    #   editable: false
+    #   jsonData:
+    #       tlsSkipVerify: true
+    #   orgId: 1
+    #   type: prometheus
+    #   url: https://{{ printf "%s-prometheus.svc" .Release.Name }}:9090
+    #   version: 1
+
 # -- Grafana dependency chart configuration. For possible values refer [here](https://github.com/grafana/helm-charts/tree/main/charts/grafana#configuration)
 grafana:
   enabled: true
@@ -785,60 +856,28 @@ grafana:
   sidecar:
     datasources:
       enabled: true
-      # -- List of default prometheus compatible datasource configurations.
-      # VM `url` will be added to each of them in templates and `type` will be set to defaultDatasourceType if not defined
-      default:
-        - name: VictoriaMetrics
-          isDefault: true
-        - name: VictoriaMetrics (DS)
-          isDefault: false
-          type: victoriametrics-datasource
       initDatasources: true
-      createVMReplicasDatasources: false
     dashboards:
       provider:
         name: default
         orgid: 1
-      additionalDashboardLabels: {}
       folder: /var/lib/grafana/dashboards
       defaultFolderName: default
-      additionalDashboardAnnotations: {}
       enabled: true
       multicluster: false
 
   # -- Create datasource configmap even if grafana deployment has been disabled
   forceDeployDatasource: false
 
-  # -- Configure additional grafana datasources (passed through tpl). Check [here](http://docs.grafana.org/administration/provisioning/#datasources) for details
-  additionalDataSources: []
-  # - name: prometheus-sample
-  #   access: proxy
-  #   basicAuth: true
-  #   basicAuthPassword: pass
-  #   basicAuthUser: daco
-  #   editable: false
-  #   jsonData:
-  #       tlsSkipVerify: true
-  #   orgId: 1
-  #   type: prometheus
-  #   url: https://{{ printf "%s-prometheus.svc" .Release.Name }}:9090
-  #   version: 1
-
-  defaultDashboardsTimezone: utc
-
   # Enabling VictoriaMetrics Datasource in Grafana. See more details here: https://github.com/VictoriaMetrics/grafana-datasource/blob/main/README.md#victoriametrics-datasource-for-grafana
   # Note that Grafana will need internet access to install the datasource plugin.
   # Uncomment the block below, if you want to enable VictoriaMetrics Datasource in Grafana:
   #plugins:
-  #  - "https://github.com/VictoriaMetrics/grafana-datasource/releases/download/v0.5.0/victoriametrics-datasource-v0.5.0.zip;victoriametrics-datasource"
+  #  - "https://github.com/VictoriaMetrics/victoriametrics-datasource/releases/download/v0.10.1/victoriametrics-datasource-v0.10.1.zip;victoriametrics-datasource"
   #grafana.ini:
   #  plugins:
   #    # Why VictoriaMetrics datasource is unsigned: https://github.com/VictoriaMetrics/grafana-datasource/blob/main/README.md#why-victoriametrics-datasource-is-unsigned
   #    allow_loading_unsigned_plugins: victoriametrics-datasource
-
-  # Change datasource type in dashboards from Prometheus to VictoriaMetrics.
-  # you can use `victoriametrics-datasource` instead of `prometheus` if enabled VictoriaMetrics Datasource above
-  defaultDatasourceType: "prometheus"
 
   ingress:
     enabled: false
@@ -1211,10 +1250,6 @@ kubeProxy:
           scheme: https
           tlsConfig:
             caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-
-# --  Install VM operator CRDs
-crds:
-  enabled: true
 
 # -- Install prometheus operator CRDs
 prometheus-operator-crds:
